@@ -73,8 +73,8 @@ SHTOOL = ../shtool
 # usual directory structure into a different tree.
 DESTDIR =
 
-SRCS = ncat_main.c ncat_connect.c ncat_core.c ncat_posix.c ncat_listen.c ncat_proxy.c ncat_ssl.c base64.c http.c util.c sys_wrap.c
-OBJS = ncat_main.o ncat_connect.o ncat_core.o ncat_posix.o ncat_listen.o ncat_proxy.o ncat_ssl.o base64.o http.o util.o sys_wrap.o
+SRCS = ncat_main.c ncat_connect.c ncat_core.c ncat_posix.c ncat_listen.c ncat_proxy.c ncat_ssl.c allowdeny_watcher.c base64.c http.c util.c sys_wrap.c
+OBJS = ncat_main.o ncat_connect.o ncat_core.o ncat_posix.o ncat_listen.o ncat_proxy.o ncat_ssl.o allowdeny_watcher.o base64.o http.o util.o sys_wrap.o
 DATAFILES =
 
 ifneq ($(HAVE_OPENSSL),)
