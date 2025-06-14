@@ -19,4 +19,11 @@ int start_allowdeny_watcher(const char *allow_path, const char *deny_path);
 }
 #endif
 
+#ifndef WIN32
+#include <pthread.h>
+
+/* Global mutex guarding access to o.allowset / o.denyset */
+extern pthread_mutex_t g_allowdeny_mutex;
+#endif
+
 #endif /* ALLOWDENY_WATCHER_H */
