@@ -10,9 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <time.h>
+#if defined(__linux__)
+#include <sys/inotify.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <sys/event.h>
+#include <fcntl.h>
+#endif
 #endif
 
 /* ------------------------------------------------------------------------- */
@@ -81,6 +86,8 @@ static void reload_rules(const struct watcher_paths *wp)
     loguser("[INFO] Re-loaded allow/deny rules (modified at %s)\n", tsbuf);
 }
 
+/* ---------------------- LINUX INOTIFY IMPLEMENTATION -------------------- */
+#if defined(__linux__)
 static void *watcher_thread(void *arg)
 {
     struct watcher_paths *wp = (struct watcher_paths *)arg;
@@ -135,7 +142,113 @@ static void *watcher_thread(void *arg)
     free(wp);
     return NULL;
 }
-#endif
+#endif /* linux */
+
+/* ---------------------- BSD KQUEUE IMPLEMENTATION ---------------------- */
+#if !defined(WIN32) && (defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__))
+static void *watcher_thread(void *arg)
+{
+    struct watcher_paths *wp = (struct watcher_paths *)arg;
+
+    int kq = kqueue();
+    if (kq < 0) {
+        loguser("[WARN] kqueue init failed: %s\n", strerror(errno));
+        free(wp);
+        return NULL;
+    }
+
+    int fd_allow = -1, fd_deny = -1;
+    if (wp->allow_path)
+        fd_allow = open(wp->allow_path, O_EVTONLY);
+    if (wp->deny_path)
+        fd_deny = open(wp->deny_path, O_EVTONLY);
+
+    struct kevent evlist[2];
+    int nev = 0;
+    if (fd_allow >= 0) {
+        EV_SET(&evlist[nev++], fd_allow, EVFILT_VNODE, EV_ADD | EV_ENABLE | EV_CLEAR,
+               NOTE_WRITE | NOTE_DELETE | NOTE_EXTEND | NOTE_RENAME, 0, NULL);
+    }
+    if (fd_deny >= 0) {
+        EV_SET(&evlist[nev++], fd_deny, EVFILT_VNODE, EV_ADD | EV_ENABLE | EV_CLEAR,
+               NOTE_WRITE | NOTE_DELETE | NOTE_EXTEND | NOTE_RENAME, 0, NULL);
+    }
+
+    if (nev == 0) {
+        close(kq);
+        free(wp);
+        return NULL;
+    }
+
+    if (kevent(kq, evlist, nev, NULL, 0, NULL) < 0) {
+        loguser("[WARN] kevent register failed: %s\n", strerror(errno));
+        close(kq);
+        free(wp);
+        return NULL;
+    }
+
+    for (;;) {
+        struct kevent ev;
+        int n = kevent(kq, NULL, 0, &ev, 1, NULL);
+        if (n == -1) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (n > 0) {
+            reload_rules(wp);
+        }
+    }
+
+    if (fd_allow >= 0) close(fd_allow);
+    if (fd_deny >= 0) close(fd_deny);
+    close(kq);
+    free(wp);
+    return NULL;
+}
+#endif /* BSD */
+
+/* ---------------------- WINDOWS IMPLEMENTATION ------------------------- */
+#ifdef WIN32
+static DWORD WINAPI watcher_thread_win(LPVOID param)
+{
+    struct watcher_paths *wp = (struct watcher_paths *)param;
+
+    /* Extract directory path */
+    char dir[MAX_PATH];
+    strncpy(dir, wp->allow_path ? wp->allow_path : wp->deny_path, MAX_PATH - 1);
+    dir[MAX_PATH-1] = '\0';
+    char *lastSep = strrchr(dir, '\\');
+    if (!lastSep) lastSep = strrchr(dir, '/');
+    if (lastSep) *lastSep = '\0';
+
+    HANDLE hDir = CreateFileA(dir, FILE_LIST_DIRECTORY,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              NULL, OPEN_EXISTING,
+                              FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hDir == INVALID_HANDLE_VALUE) {
+        loguser("[WARN] Unable to watch directory %s (err=%lu)\n", dir, GetLastError());
+        free(wp);
+        return 0;
+    }
+
+    BYTE buf[1024];
+    DWORD bytesReturned;
+    while (1) {
+        if (!ReadDirectoryChangesW(hDir, buf, sizeof(buf), FALSE,
+                                   FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
+                                   &bytesReturned, NULL, NULL)) {
+            Sleep(200);
+            continue;
+        }
+        reload_rules(wp);
+    }
+
+    CloseHandle(hDir);
+    free(wp);
+    return 0;
+}
+#endif /* WIN32 */
 
 /* ------------------------------------------------------------------------- */
 /* Public API                                                                */
@@ -148,21 +261,30 @@ int start_allowdeny_watcher(const char *allow_path, const char *deny_path)
     if (allow_path == NULL && deny_path == NULL)
         return 0;
 
-#ifndef WIN32
-    pthread_t tid;
     struct watcher_paths *wp = (struct watcher_paths *)safe_malloc(sizeof(*wp));
     wp->allow_path = allow_path ? Strdup(allow_path) : NULL;
     wp->deny_path  = deny_path  ? Strdup(deny_path)  : NULL;
 
+#if defined(__linux__)
+    pthread_t tid;
     if (pthread_create(&tid, NULL, watcher_thread, wp) != 0) {
-        bye("Failed to create allow/deny watcher thread: %s", strerror(errno));
-        return -1; /* not reached */
+        bye("Failed to create watcher thread: %s", strerror(errno));
     }
     pthread_detach(tid);
-#else
-    /* TODO: Windows ReadDirectoryChangesW implementation in later steps. */
-    (void)allow_path;
-    (void)deny_path;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, watcher_thread, wp) != 0) {
+        bye("Failed to create watcher thread: %s", strerror(errno));
+    }
+    pthread_detach(tid);
+#elif defined(WIN32)
+    HANDLE th = CreateThread(NULL, 0, watcher_thread_win, wp, 0, NULL);
+    if (th == NULL) {
+        loguser("[WARN] Failed to start watcher thread (err=%lu)\n", GetLastError());
+        free(wp);
+        return -1;
+    }
+    CloseHandle(th);
 #endif
 
     return 0;
