@@ -191,7 +191,7 @@ distclean-lua:
 distclean: clean @LUA_DIST_CLEAN@
 	-rm -f Makefile makefile.dep $(CONFIG_CLEAN_FILES)
 
-TESTS = ./test-addrset.sh ./test-cmdline-split ./test-uri
+TESTS = ./test-addrset.sh ./test-cmdline-split ./test-uri ./test-watch-allow-deny.sh
 ifneq ($(HAVE_OPENSSL),)
 TESTS += ./test-wildcard
 endif
